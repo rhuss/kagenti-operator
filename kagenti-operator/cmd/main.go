@@ -23,7 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kagenti/operator/internal/builder/tekton"
+	tektonbuilder "github.com/kagenti/operator/internal/builder/tekton"
+	"github.com/kagenti/operator/internal/tekton"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -189,6 +190,10 @@ func main() {
 	distType := distribution.Detect(ctrl.GetConfigOrDie())
 	setupLog.Info("Detected Kubernetes distribution", "distribution", distType)
 
+	// Detect Tekton availability for conditional AgentBuild controller registration
+	tektonAvailable := tekton.IsAvailable(ctrl.GetConfigOrDie())
+	setupLog.Info("Tekton Pipelines availability", "available", tektonAvailable)
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsServerOptions,
@@ -227,20 +232,25 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
-	if err = (&controller.AgentBuildReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Builder: tekton.NewTektonBuilder(
-			mgr.GetClient(),
-			mgr.GetLogger(),
-			mgr.GetScheme(),
-			tekton.NewPipelineComposer(mgr.GetClient(), mgr.GetLogger()),
-			tekton.NewWorkspaceManager(mgr.GetClient(), mgr.GetScheme(), mgr.GetLogger()),
-		),
-		Recorder: mgr.GetEventRecorderFor("agentbuild-controller"),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AgentBuild")
-		os.Exit(1)
+	// Only register AgentBuild controller if Tekton is available
+	if tektonAvailable {
+		if err = (&controller.AgentBuildReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Builder: tektonbuilder.NewTektonBuilder(
+				mgr.GetClient(),
+				mgr.GetLogger(),
+				mgr.GetScheme(),
+				tektonbuilder.NewPipelineComposer(mgr.GetClient(), mgr.GetLogger()),
+				tektonbuilder.NewWorkspaceManager(mgr.GetClient(), mgr.GetScheme(), mgr.GetLogger()),
+			),
+			Recorder: mgr.GetEventRecorderFor("agentbuild-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "AgentBuild")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Skipping AgentBuild controller registration - Tekton Pipelines not installed")
 	}
 
 	if err = (&controller.AgentCardReconciler{
@@ -256,7 +266,7 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentCardSync")
 	}
-	if err = webhookv1alpha1.SetupAgentBuildWebhookWithManager(mgr); err != nil {
+	if err = webhookv1alpha1.SetupAgentBuildWebhookWithManager(mgr, tektonAvailable); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "AgentBuild")
 		os.Exit(1)
 	}

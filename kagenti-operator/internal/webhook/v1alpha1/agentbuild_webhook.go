@@ -42,12 +42,13 @@ const (
 	DefaultPipelineMode = "dev"
 )
 
-// SetupAgentBuildWebhookWithManager will setup the manager to manage the webhooks
-func SetupAgentBuildWebhookWithManager(mgr ctrl.Manager) error {
+// SetupAgentBuildWebhookWithManager will setup the manager to manage the webhooks.
+// The tektonAvailable parameter indicates whether Tekton Pipelines CRDs are installed.
+func SetupAgentBuildWebhookWithManager(mgr ctrl.Manager, tektonAvailable bool) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(&agentv1alpha1.AgentBuild{}).
 		WithDefaulter(&AgentBuildDefaulter{Client: mgr.GetClient()}).
-		WithValidator(&AgentBuildValidator{}).
+		WithValidator(&AgentBuildValidator{TektonAvailable: tektonAvailable}).
 		Complete()
 }
 
@@ -389,7 +390,10 @@ func (d *AgentBuildDefaulter) resolveTemplateValue(value string, vars map[string
 //+kubebuilder:webhook:path=/validate-agent-kagenti-dev-v1alpha1-agentbuild,mutating=false,failurePolicy=fail,sideEffects=None,groups=agent.kagenti.dev,resources=agentbuilds,verbs=create;update,versions=v1alpha1,name=vagentbuild.kb.io,admissionReviewVersions=v1
 
 // AgentBuildValidator implements validating webhook for AgentBuild
-type AgentBuildValidator struct{}
+type AgentBuildValidator struct {
+	// TektonAvailable indicates whether Tekton Pipelines CRDs are installed in the cluster
+	TektonAvailable bool
+}
 
 // ValidateCreate implements webhook validation for create
 func (v *AgentBuildValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
@@ -429,6 +433,13 @@ func (v *AgentBuildValidator) ValidateDelete(ctx context.Context, obj runtime.Ob
 }
 
 func (v *AgentBuildValidator) validateAgentBuild(agentbuild *agentv1alpha1.AgentBuild) error {
+	// Check Tekton availability first
+	if !v.TektonAvailable {
+		return fmt.Errorf("AgentBuild resources require Tekton Pipelines to be installed. " +
+			"Please install Tekton (kubectl apply -f https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml) " +
+			"and restart the operator")
+	}
+
 	// Validate source repository is specified
 	if agentbuild.Spec.SourceSpec.SourceRepository == "" {
 		return fmt.Errorf("spec.source.sourceRepository is required")
