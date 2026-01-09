@@ -1,0 +1,65 @@
+# Minimal Weather Agent Deployment
+#
+# Prerequisites:
+# 1. Kagenti Operator installed (helm install kagenti-operator ...)
+# 2. Ollama running locally with llama3.2:3b-instruct-fp16 model
+#
+# Usage:
+#   kubectl create namespace kagenti
+#   kubectl apply -f weather-agent-minimal.yaml
+#
+# Test:
+#   kubectl get agents -n kagenti
+#   kubectl logs -l app.kubernetes.io/name=weather-agent -n kagenti
+#
+# Note: For Docker Desktop, host.docker.internal resolves to localhost.
+# For kind/minikube, adjust LLM_API_BASE to your Ollama endpoint.
+---
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: Agent
+metadata:
+  name: weather-agent
+  namespace: kagenti
+  labels:
+    app.kubernetes.io/name: weather-agent
+    kagenti.io/type: agent
+spec:
+  description: "Minimal weather agent example"
+  replicas: 1
+  imageSource:
+    image: "ghcr.io/kagenti/agent-examples/weather_service:v0.0.1-alpha.3"
+  servicePorts:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  podTemplateSpec:
+    spec:
+      containers:
+      - name: agent
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        env:
+        # Required: Basic configuration
+        - name: PORT
+          value: "8000"
+        - name: HOST
+          value: "0.0.0.0"
+        # Required: LLM configuration (Ollama)
+        - name: LLM_API_BASE
+          value: "http://host.docker.internal:11434/v1"
+        - name: LLM_API_KEY
+          value: "dummy"
+        - name: LLM_MODEL
+          value: "llama3.2:3b-instruct-fp16"
+        # Optional: Cache directory
+        - name: UV_CACHE_DIR
+          value: "/app/.cache/uv"
+        volumeMounts:
+        - name: cache
+          mountPath: /app/.cache
+      volumes:
+      - name: cache
+        emptyDir: {}
