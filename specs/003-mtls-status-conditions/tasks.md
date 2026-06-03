@@ -17,8 +17,8 @@
 
 **Purpose**: Add condition type constants and ensure the save/restore pattern is in place
 
-- [ ] T001 Add condition type constants `ConditionTypeControlPlaneMTLS` and `ConditionTypeDataPlaneMTLS` in `kagenti-operator/internal/controller/agentruntime_controller.go`
-- [ ] T002 Add save/restore for `rt.Status` around `persistCardFetchAnnotation()` call in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T001 Add condition type constants `ConditionTypeControlPlaneMTLS` and `ConditionTypeDataPlaneMTLS` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T002 Add save/restore for `rt.Status` around `persistCardFetchAnnotation()` call in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
 
 ---
 
@@ -30,17 +30,17 @@
 
 ### Tests for User Story 1
 
-- [ ] T003 [P] [US1] Add envtest case: verified fetch succeeds with mTLS, assert `ControlPlaneMTLS` condition True/mTLS with SPIFFE ID in message, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T004 [P] [US1] Add envtest case: verified fetch falls back to plaintext (no TLS port), assert `ControlPlaneMTLS` condition False/PlainHTTP, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T005 [P] [US1] Add envtest case: verified fetch disabled (`AuthenticatedFetcher` nil), assert `ControlPlaneMTLS` condition False/Disabled, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T006 [P] [US1] Add envtest case: card fetch skipped (change key match), assert `ControlPlaneMTLS` condition False/FetchSkipped, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T003 [P] [US1] Add envtest case: verified fetch succeeds with mTLS, assert `ControlPlaneMTLS` condition True/mTLS with SPIFFE ID in message, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T004 [P] [US1] Add envtest case: verified fetch falls back to plaintext (no TLS port), assert `ControlPlaneMTLS` condition False/PlainHTTP, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T005 [P] [US1] Add envtest case: verified fetch disabled (`AuthenticatedFetcher` nil), assert `ControlPlaneMTLS` condition False/Disabled, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T006 [P] [US1] Add envtest case: card fetch skipped (change key match), assert `ControlPlaneMTLS` condition False/FetchSkipped, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Set `ControlPlaneMTLS` True/mTLS with SPIFFE ID when `AuthenticatedFetcher` succeeds in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
-- [ ] T008 [US1] Set `ControlPlaneMTLS` False/PlainHTTP when falling back to HTTP fetch (TLS port not found) in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
-- [ ] T009 [US1] Set `ControlPlaneMTLS` False/Disabled when `AuthenticatedFetcher` is nil in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
-- [ ] T010 [US1] Set `ControlPlaneMTLS` False/FetchSkipped when fetch is skipped due to change key match in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T007 [US1] Set `ControlPlaneMTLS` True/mTLS with SPIFFE ID when `AuthenticatedFetcher` succeeds in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T008 [US1] Set `ControlPlaneMTLS` False/PlainHTTP when falling back to HTTP fetch (TLS port not found) in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T009 [US1] Set `ControlPlaneMTLS` False/Disabled when `AuthenticatedFetcher` is nil in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T010 [US1] Set `ControlPlaneMTLS` False/FetchSkipped when fetch is skipped due to change key match in `fetchAndUpdateCard()` in `kagenti-operator/internal/controller/agentruntime_controller.go`
 
 **Checkpoint**: `ControlPlaneMTLS` condition visible on AgentRuntime after card fetch. All 4 states tested.
 
@@ -54,15 +54,15 @@
 
 ### Tests for User Story 2
 
-- [ ] T011 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: strict` and `authBridgeMode: proxy-sidecar`, assert `DataPlaneMTLS` condition True/Strict, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T012 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: permissive`, assert `DataPlaneMTLS` condition True/Permissive, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T013 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: disabled` or empty, assert `DataPlaneMTLS` condition False/Disabled, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T014 [P] [US2] Add envtest case: AgentRuntime with no `authBridgeMode`, assert `DataPlaneMTLS` condition False/NoSidecar, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T011 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: strict` and `authBridgeMode: proxy-sidecar`, assert `DataPlaneMTLS` condition True/Strict, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T012 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: permissive`, assert `DataPlaneMTLS` condition True/Permissive, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T013 [P] [US2] Add envtest case: AgentRuntime with `mtlsMode: disabled` or empty, assert `DataPlaneMTLS` condition False/Disabled, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T014 [P] [US2] Add envtest case: AgentRuntime with no `authBridgeMode`, assert `DataPlaneMTLS` condition False/NoSidecar, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] Add `DataPlaneMTLS` condition logic after `ComputeConfigHash()` in `Reconcile()`, reading resolved `AuthBridgeMode` and `MTLSMode` from `configResult`, in `kagenti-operator/internal/controller/agentruntime_controller.go`
-- [ ] T016 [US2] Expose resolved `AuthBridgeMode` and `MTLSMode` from `ComputeConfigHash()` return value (add fields to `ConfigResult` struct if not already present) in `kagenti-operator/internal/controller/agentruntime_config.go`
+- [X] T015 [US2] Add `DataPlaneMTLS` condition logic after `ComputeConfigHash()` in `Reconcile()`, reading resolved `AuthBridgeMode` and `MTLSMode` from `configResult`, in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T016 [US2] Expose resolved `AuthBridgeMode` and `MTLSMode` from `ComputeConfigHash()` return value (add fields to `ConfigResult` struct if not already present) in `kagenti-operator/internal/controller/agentruntime_config.go`
 
 **Checkpoint**: `DataPlaneMTLS` condition visible on AgentRuntime reflecting resolved config chain. All 4 states tested.
 
@@ -76,11 +76,11 @@
 
 ### Tests for User Story 3
 
-- [ ] T017 [US3] Add test case: verify warning log emitted on plaintext fallback containing agent name and namespace, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T017 [US3] Add test case: verify warning log emitted on plaintext fallback containing agent name and namespace, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
 
 ### Implementation for User Story 3
 
-- [ ] T018 [US3] Add structured warning log at V(0) level in the HTTP fallback path of `fetchCard()`, including agent name (`ref.Name`) and namespace (`rt.Namespace`), in `kagenti-operator/internal/controller/agentruntime_controller.go`
+- [X] T018 [US3] Add structured warning log at V(0) level in the HTTP fallback path of `fetchCard()`, including agent name (`ref.Name`) and namespace (`rt.Namespace`), in `kagenti-operator/internal/controller/agentruntime_controller.go`
 
 **Checkpoint**: Plaintext fallback produces a warning log with agent context. Existing Event emission preserved.
 
@@ -90,8 +90,8 @@
 
 **Purpose**: Verify integration across all conditions
 
-- [ ] T019 Add envtest case: SPIRE transitions from unavailable to available, verify `ControlPlaneMTLS` transitions from False/PlainHTTP to True/mTLS across reconcile cycles, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
-- [ ] T020 Verify save/restore pattern: add envtest case confirming conditions survive the `persistCardFetchAnnotation()` Patch (read back from API server after reconcile), in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T019 Add envtest case: SPIRE transitions from unavailable to available, verify `ControlPlaneMTLS` transitions from False/PlainHTTP to True/mTLS across reconcile cycles, in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
+- [X] T020 Verify save/restore pattern: add envtest case confirming conditions survive the `persistCardFetchAnnotation()` Patch (read back from API server after reconcile), in `kagenti-operator/internal/controller/agentruntime_controller_test.go`
 
 ---
 

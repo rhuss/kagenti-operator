@@ -68,10 +68,12 @@ const (
 	AnnotationRestartPending = "kagenti.io/restart-pending"
 
 	// Condition types for AgentRuntime status.
-	ConditionTypeReady          = "Ready"
-	ConditionTypeTargetResolved = "TargetResolved"
-	ConditionTypeConfigResolved = "ConfigResolved"
-	ConditionTypeCardSynced     = "CardSynced"
+	ConditionTypeReady             = "Ready"
+	ConditionTypeTargetResolved    = "TargetResolved"
+	ConditionTypeConfigResolved    = "ConfigResolved"
+	ConditionTypeCardSynced        = "CardSynced"
+	ConditionTypeControlPlaneMTLS  = "ControlPlaneMTLS"
+	ConditionTypeDataPlaneMTLS     = "DataPlaneMTLS"
 
 	// AnnotationLastCardFetchHash stores the change-detection key used to skip
 	// redundant card fetches when the workload's pod template has not changed.
@@ -208,6 +210,9 @@ func (r *AgentRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		r.setCondition(rt, ConditionTypeConfigResolved, metav1.ConditionTrue, "ConfigResolved",
 			"Configuration resolved successfully")
 	}
+
+	// 5.1. Set DataPlaneMTLS condition based on resolved config
+	r.setDataPlaneMTLSCondition(rt, configResult)
 
 	// 5.5. Card discovery phase: fetch agent card from Service endpoint
 	r.fetchAndUpdateCard(ctx, rt)
@@ -704,6 +709,23 @@ func (r *AgentRuntimeReconciler) setCondition(rt *agentv1alpha1.AgentRuntime, co
 	})
 }
 
+func (r *AgentRuntimeReconciler) setDataPlaneMTLSCondition(rt *agentv1alpha1.AgentRuntime, cfg ConfigResult) {
+	switch {
+	case cfg.AuthBridgeMode == "":
+		r.setCondition(rt, ConditionTypeDataPlaneMTLS, metav1.ConditionFalse, "NoSidecar",
+			"No authbridge sidecar configured; data-plane mTLS inactive")
+	case strings.EqualFold(cfg.MTLSMode, "strict"):
+		r.setCondition(rt, ConditionTypeDataPlaneMTLS, metav1.ConditionTrue, "Strict",
+			"Data-plane mTLS enforced in strict mode")
+	case strings.EqualFold(cfg.MTLSMode, "permissive"):
+		r.setCondition(rt, ConditionTypeDataPlaneMTLS, metav1.ConditionTrue, "Permissive",
+			"Data-plane mTLS active in permissive mode (accepts plaintext)")
+	default:
+		r.setCondition(rt, ConditionTypeDataPlaneMTLS, metav1.ConditionFalse, "Disabled",
+			"Data-plane mTLS is disabled")
+	}
+}
+
 // fetchAndUpdateCard discovers the agent card from the workload's Service endpoint
 // and populates status.card. Skips fetch when the feature flag is disabled or
 // when the workload's change-detection key has not changed.
@@ -716,6 +738,8 @@ func (r *AgentRuntimeReconciler) fetchAndUpdateCard(ctx context.Context, rt *age
 			r.setCondition(rt, ConditionTypeCardSynced, metav1.ConditionFalse, "CardDiscoveryDisabled",
 				"Card discovery is disabled; stale card data cleared")
 		}
+		r.setCondition(rt, ConditionTypeControlPlaneMTLS, metav1.ConditionFalse, "Disabled",
+			"Card discovery is disabled; control-plane mTLS status unknown")
 		return
 	}
 
@@ -744,6 +768,14 @@ func (r *AgentRuntimeReconciler) fetchAndUpdateCard(ctx context.Context, rt *age
 		logger.Error(err, "Card fetch failed", "workload", rt.Spec.TargetRef.Name)
 		r.setCondition(rt, ConditionTypeCardSynced, metav1.ConditionFalse, "CardFetchFailed", err.Error())
 		return
+	}
+
+	if fetchResult != nil && fetchResult.AgentSpiffeID != "" {
+		r.setCondition(rt, ConditionTypeControlPlaneMTLS, metav1.ConditionTrue, "mTLS",
+			fmt.Sprintf("Agent card fetched via mTLS (SPIFFE ID: %s)", fetchResult.AgentSpiffeID))
+	} else {
+		r.setCondition(rt, ConditionTypeControlPlaneMTLS, metav1.ConditionFalse, "PlainHTTP",
+			"Agent card fetched via plaintext HTTP (no mTLS)")
 	}
 
 	newCardID := computeCardContentHash(cardData)
@@ -832,7 +864,8 @@ func (r *AgentRuntimeReconciler) fetchCard(
 			}
 			return fetchResult.CardData, fetchResult, nil
 		}
-		logger.Info("TLS port not found, falling back to HTTP fetch",
+		logger.V(0).Info("Plaintext HTTP fallback for agent card fetch",
+			"agent", ref.Name, "namespace", rt.Namespace,
 			"service", svc.Name, "expectedPortName", AgentTLSPortName)
 		if r.Recorder != nil {
 			r.Recorder.Event(rt, corev1.EventTypeWarning, "FallbackToHTTP",

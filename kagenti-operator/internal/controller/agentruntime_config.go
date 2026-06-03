@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
 )
@@ -97,10 +98,12 @@ type skillConfig struct {
 	PullPolicy string `json:"pullPolicy,omitempty"`
 }
 
-// ConfigResult holds the computed hash and any warnings from the config resolution.
+// ConfigResult holds the computed hash, resolved modes, and any warnings from the config resolution.
 type ConfigResult struct {
-	Hash     string
-	Warnings []string
+	Hash           string
+	Warnings       []string
+	AuthBridgeMode string
+	MTLSMode       string
 }
 
 // ComputeConfigHash computes a deterministic SHA256 hash from the 3-layer
@@ -112,7 +115,12 @@ func ComputeConfigHash(ctx context.Context, c client.Reader, namespace string, s
 	if err != nil {
 		return ConfigResult{}, err
 	}
-	return ConfigResult{Hash: hash, Warnings: warnings}, nil
+	return ConfigResult{
+		Hash:           hash,
+		Warnings:       warnings,
+		AuthBridgeMode: resolved.AuthBridgeMode,
+		MTLSMode:       resolved.MTLSMode,
+	}, nil
 }
 
 // ComputeDefaultsOnlyHash computes a hash using only cluster + namespace defaults
@@ -172,7 +180,13 @@ func resolveConfig(ctx context.Context, c client.Reader, namespace string, spec 
 	}
 
 	resolved.AuthBridgeMode = spec.AuthBridgeMode
+	if resolved.AuthBridgeMode == "" && abRuntime != "" {
+		resolved.AuthBridgeMode = extractModeFromYAML(abRuntime)
+	}
 	resolved.MTLSMode = spec.MTLSMode
+	if resolved.MTLSMode == "" && abRuntime != "" {
+		resolved.MTLSMode = extractMTLSModeFromYAML(abRuntime)
+	}
 
 	for _, s := range spec.Skills {
 		resolved.Skills = append(resolved.Skills, skillConfig{
@@ -249,6 +263,34 @@ func mergeMaps(base, override map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// extractModeFromYAML parses the top-level "mode" field from an
+// authbridge-runtime-config config.yaml string. Mirrors
+// injector.ExtractMode but avoids a circular import.
+func extractModeFromYAML(configYAML string) string {
+	var top struct {
+		Mode string `json:"mode"`
+	}
+	if err := yaml.Unmarshal([]byte(configYAML), &top); err != nil {
+		return ""
+	}
+	return top.Mode
+}
+
+// extractMTLSModeFromYAML parses the "mtls.mode" field from an
+// authbridge-runtime-config config.yaml string. Mirrors
+// injector.ExtractMTLSMode but avoids a circular import.
+func extractMTLSModeFromYAML(configYAML string) string {
+	var top struct {
+		MTLS struct {
+			Mode string `json:"mode"`
+		} `json:"mtls"`
+	}
+	if err := yaml.Unmarshal([]byte(configYAML), &top); err != nil {
+		return ""
+	}
+	return top.MTLS.Mode
 }
 
 // hashResolvedConfig produces a deterministic SHA256 hex string from the resolved config.

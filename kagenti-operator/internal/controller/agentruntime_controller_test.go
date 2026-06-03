@@ -17,8 +17,10 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,9 +32,11 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentv1alpha1 "github.com/kagenti/operator/api/v1alpha1"
+	"github.com/kagenti/operator/internal/agentcard"
 	webhookconfig "github.com/kagenti/operator/internal/webhook/config"
 )
 
@@ -43,6 +47,15 @@ type stubCardFetcher struct {
 
 func (f *stubCardFetcher) Fetch(_ context.Context, _, _, _, _ string) (*agentv1alpha1.AgentCardData, error) {
 	return f.card, f.err
+}
+
+type stubAuthenticatedFetcher struct {
+	result *agentcard.FetchResult
+	err    error
+}
+
+func (f *stubAuthenticatedFetcher) FetchAuthenticated(_ context.Context, _, _ string) (*agentcard.FetchResult, error) {
+	return f.result, f.err
 }
 
 var _ = Describe("AgentRuntime Controller", func() {
@@ -1056,6 +1069,533 @@ var _ = Describe("AgentRuntime Controller", func() {
 			Expect(targetCond).NotTo(BeNil(), "TargetResolved condition must not be wiped by annotation patch")
 			configCond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeConfigResolved)
 			Expect(configCond).NotTo(BeNil(), "ConfigResolved condition must not be wiped by annotation patch")
+		})
+	})
+
+	Context("ControlPlaneMTLS condition", func() {
+		It("should set True/mTLS with SPIFFE ID when authenticated fetch succeeds", func() {
+			depName := "mtls-ok-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+						{Name: AgentTLSPortName, Port: 8443, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := newAgentRuntime("mtls-ok-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AuthenticatedFetcher: &stubAuthenticatedFetcher{
+					result: &agentcard.FetchResult{
+						CardData:      &agentv1alpha1.AgentCardData{Name: "Secure Agent"},
+						AgentSpiffeID: "spiffe://example.org/ns/default/sa/agent",
+					},
+				},
+			}
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("mTLS"))
+			Expect(cond.Message).To(ContainSubstring("spiffe://example.org/ns/default/sa/agent"))
+		})
+
+		It("should set False/PlainHTTP when TLS port not found and falls back to HTTP", func() {
+			depName := "mtls-plain-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := newAgentRuntime("mtls-plain-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AuthenticatedFetcher: &stubAuthenticatedFetcher{
+					result: &agentcard.FetchResult{
+						CardData: &agentv1alpha1.AgentCardData{Name: "Plain Agent"},
+					},
+				},
+				AgentFetcher: &stubCardFetcher{
+					card: &agentv1alpha1.AgentCardData{Name: "Plain Agent"},
+				},
+			}
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("PlainHTTP"))
+		})
+
+		It("should set False/PlainHTTP when AuthenticatedFetcher is nil", func() {
+			depName := "mtls-nofetcher-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := newAgentRuntime("mtls-nofetcher-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AgentFetcher: &stubCardFetcher{
+					card: &agentv1alpha1.AgentCardData{Name: "Unverified Agent"},
+				},
+			}
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("PlainHTTP"))
+			Expect(cond.Message).To(ContainSubstring("plaintext HTTP"))
+		})
+
+		It("should set False/Disabled when card discovery is disabled", func() {
+			rt := &agentv1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "mtls-carddiscovery-off-rt", Namespace: namespace},
+				Status:     agentv1alpha1.AgentRuntimeStatus{},
+			}
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: false,
+			}
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("Disabled"))
+			Expect(cond.Message).To(ContainSubstring("disabled"))
+		})
+
+		It("should preserve existing ControlPlaneMTLS condition when fetch is skipped", func() {
+			depName := "mtls-skip-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := newAgentRuntime("mtls-skip-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			now := metav1.Now()
+			rt.Status.Card = &agentv1alpha1.CardStatus{
+				AgentCardData: agentv1alpha1.AgentCardData{Name: "Cached Agent"},
+				FetchedAt:     &now,
+			}
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AgentFetcher: &stubCardFetcher{
+					card: &agentv1alpha1.AgentCardData{Name: "Cached Agent"},
+				},
+			}
+
+			// First fetch sets PlainHTTP condition and populates the annotation
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("PlainHTTP"))
+
+			// Re-read rt to get the annotation set by persistCardFetchAnnotation
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mtls-skip-rt", Namespace: namespace}, rt)).To(Succeed())
+			rt.Status.Card = &agentv1alpha1.CardStatus{
+				AgentCardData: agentv1alpha1.AgentCardData{Name: "Cached Agent"},
+				FetchedAt:     &now,
+			}
+			// Restore the PlainHTTP condition (simulating persisted state)
+			meta.SetStatusCondition(&rt.Status.Conditions, metav1.Condition{
+				Type: ConditionTypeControlPlaneMTLS, Status: metav1.ConditionFalse,
+				Reason: "PlainHTTP", Message: "Agent card fetched via plaintext HTTP (no mTLS)",
+			})
+
+			// Second fetch should skip, preserving the existing PlainHTTP condition
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond = meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("PlainHTTP"), "existing condition should be preserved when fetch is skipped")
+		})
+	})
+
+	Context("DataPlaneMTLS condition", func() {
+		It("should set True/Strict when mtlsMode is strict with proxy-sidecar", func() {
+			depName := "dp-strict-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			rt := &agentv1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "dp-strict-rt", Namespace: namespace},
+				Spec: agentv1alpha1.AgentRuntimeSpec{
+					Type:           agentv1alpha1.RuntimeTypeAgent,
+					TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: depName},
+					AuthBridgeMode: "proxy-sidecar",
+					MTLSMode:       "strict",
+				},
+			}
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := newReconciler()
+			nn := types.NamespacedName{Name: "dp-strict-rt", Namespace: namespace}
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &agentv1alpha1.AgentRuntime{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeDataPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Strict"))
+		})
+
+		It("should set True/Permissive when mtlsMode is permissive", func() {
+			depName := "dp-perm-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			rt := &agentv1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "dp-perm-rt", Namespace: namespace},
+				Spec: agentv1alpha1.AgentRuntimeSpec{
+					Type:           agentv1alpha1.RuntimeTypeAgent,
+					TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: depName},
+					AuthBridgeMode: "proxy-sidecar",
+					MTLSMode:       "permissive",
+				},
+			}
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := newReconciler()
+			nn := types.NamespacedName{Name: "dp-perm-rt", Namespace: namespace}
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &agentv1alpha1.AgentRuntime{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeDataPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("Permissive"))
+		})
+
+		It("should set False/Disabled when mtlsMode is disabled or empty", func() {
+			depName := "dp-off-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			rt := &agentv1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "dp-off-rt", Namespace: namespace},
+				Spec: agentv1alpha1.AgentRuntimeSpec{
+					Type:           agentv1alpha1.RuntimeTypeAgent,
+					TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: depName},
+					AuthBridgeMode: "proxy-sidecar",
+					MTLSMode:       "disabled",
+				},
+			}
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := newReconciler()
+			nn := types.NamespacedName{Name: "dp-off-rt", Namespace: namespace}
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &agentv1alpha1.AgentRuntime{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeDataPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("Disabled"))
+		})
+
+		It("should set False/NoSidecar when authBridgeMode is empty", func() {
+			depName := "dp-nosidecar-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			rt := newAgentRuntime("dp-nosidecar-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := newReconciler()
+			nn := types.NamespacedName{Name: "dp-nosidecar-rt", Namespace: namespace}
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &agentv1alpha1.AgentRuntime{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeDataPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("NoSidecar"))
+		})
+	})
+
+	Context("Warning log on plaintext fallback", func() {
+		It("should emit warning log with agent name and namespace on HTTP fallback", func() {
+			depName := "warn-fallback-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := newAgentRuntime("warn-fallback-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			// Use a log buffer at V(0) only to verify warning-level output
+			var logBuf bytes.Buffer
+			bufLogger := funcr.New(func(prefix, args string) {
+				logBuf.WriteString(prefix + " " + args + "\n")
+			}, funcr.Options{Verbosity: 0})
+			logCtx := log.IntoContext(ctx, bufLogger)
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AuthenticatedFetcher: &stubAuthenticatedFetcher{
+					result: &agentcard.FetchResult{
+						CardData: &agentv1alpha1.AgentCardData{Name: "Fallback Agent"},
+					},
+				},
+				AgentFetcher: &stubCardFetcher{
+					card: &agentv1alpha1.AgentCardData{Name: "Fallback Agent"},
+				},
+			}
+
+			_, _, err := r.fetchCard(logCtx, rt, svc, 8080, "a2a")
+			Expect(err).NotTo(HaveOccurred())
+
+			logOutput := logBuf.String()
+			Expect(logOutput).To(ContainSubstring("Plaintext HTTP fallback"))
+			Expect(logOutput).To(ContainSubstring(depName))
+			Expect(logOutput).To(ContainSubstring(namespace))
+		})
+	})
+
+	Context("ControlPlaneMTLS transitions across reconcile cycles", func() {
+		It("should transition from PlainHTTP to mTLS when TLS port becomes available", func() {
+			depName := "mtls-transition-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			rt := newAgentRuntime("mtls-trans-rt", namespace, depName, agentv1alpha1.RuntimeTypeAgent)
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			// Phase 1: No TLS port available, falls back to plaintext HTTP
+			svcNoTLS := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svcNoTLS)).To(Succeed())
+
+			r := &AgentRuntimeReconciler{
+				Client:              k8sClient,
+				EnableCardDiscovery: true,
+				AuthenticatedFetcher: &stubAuthenticatedFetcher{
+					result: &agentcard.FetchResult{
+						CardData: &agentv1alpha1.AgentCardData{Name: "Transition Agent"},
+					},
+				},
+				AgentFetcher: &stubCardFetcher{
+					card: &agentv1alpha1.AgentCardData{Name: "Transition Agent"},
+				},
+			}
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond := meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("PlainHTTP"))
+
+			// Phase 2: TLS port becomes available, mTLS succeeds
+			Expect(k8sClient.Delete(ctx, svcNoTLS)).To(Succeed())
+			svcWithTLS := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+						{Name: AgentTLSPortName, Port: 8443, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svcWithTLS)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svcWithTLS) }()
+
+			r.AuthenticatedFetcher = &stubAuthenticatedFetcher{
+				result: &agentcard.FetchResult{
+					CardData:      &agentv1alpha1.AgentCardData{Name: "Transition Agent v2"},
+					AgentSpiffeID: "spiffe://cluster.local/ns/default/sa/agent",
+				},
+			}
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mtls-trans-rt", Namespace: namespace}, rt)).To(Succeed())
+			rt.Status.Card = nil
+			r.fetchAndUpdateCard(ctx, rt)
+
+			cond = meta.FindStatusCondition(rt.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("mTLS"))
+			Expect(cond.Message).To(ContainSubstring("spiffe://cluster.local/ns/default/sa/agent"))
+		})
+	})
+
+	Context("mTLS conditions survive annotation patch", func() {
+		It("should preserve ControlPlaneMTLS and DataPlaneMTLS conditions after persistCardFetchAnnotation", func() {
+			depName := "cond-persist-deploy"
+			dep := newDeployment(depName, namespace)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dep) }()
+
+			svc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: namespace},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": depName},
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP},
+						{Name: AgentTLSPortName, Port: 8443, Protocol: corev1.ProtocolTCP},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, svc) }()
+
+			rt := &agentv1alpha1.AgentRuntime{
+				ObjectMeta: metav1.ObjectMeta{Name: "cond-persist-rt", Namespace: namespace},
+				Spec: agentv1alpha1.AgentRuntimeSpec{
+					Type:           agentv1alpha1.RuntimeTypeAgent,
+					TargetRef:      agentv1alpha1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: depName},
+					AuthBridgeMode: "proxy-sidecar",
+					MTLSMode:       "strict",
+				},
+			}
+			Expect(k8sClient.Create(ctx, rt)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, rt) }()
+
+			r := newReconciler()
+			r.EnableCardDiscovery = true
+			r.AuthenticatedFetcher = &stubAuthenticatedFetcher{
+				result: &agentcard.FetchResult{
+					CardData:      &agentv1alpha1.AgentCardData{Name: "Persist Agent"},
+					AgentSpiffeID: "spiffe://example.org/agent",
+				},
+			}
+			nn := types.NamespacedName{Name: "cond-persist-rt", Namespace: namespace}
+
+			// First reconcile: finalizer
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			// Second reconcile: full flow
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Read back from API server to verify conditions survived the full reconcile
+			updated := &agentv1alpha1.AgentRuntime{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			cpCond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeControlPlaneMTLS)
+			Expect(cpCond).NotTo(BeNil(), "ControlPlaneMTLS condition must survive reconcile")
+			Expect(cpCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cpCond.Reason).To(Equal("mTLS"))
+
+			dpCond := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeDataPlaneMTLS)
+			Expect(dpCond).NotTo(BeNil(), "DataPlaneMTLS condition must survive reconcile")
+			Expect(dpCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(dpCond.Reason).To(Equal("Strict"))
 		})
 	})
 
